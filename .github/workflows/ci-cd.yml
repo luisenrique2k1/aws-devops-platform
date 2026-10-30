@@ -69,3 +69,65 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+  deploy-to-ecs:
+    name: Deploy FastAPI to ECS Fargate
+    runs-on: ubuntu-24.04
+    needs: push-to-ecr
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1
+
+      - name: Deploy new Docker image to ECS
+        env:
+          AWS_REGION: eu-north-1
+          AWS_ACCOUNT_ID: "273422285435"
+          ECS_CLUSTER: aws-devops-fastapi-cluster
+          ECS_SERVICE: aws-devops-fastapi-service
+          TASK_FAMILY: aws-devops-fastapi
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/aws-devops-fastapi:$IMAGE_TAG"
+
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+          jq --arg IMAGE "$IMAGE_URI" '
+            .containerDefinitions |= map(
+              if .name == "fastapi" then .image = $IMAGE else . end
+            )
+            | del(
+                .taskDefinitionArn,
+                .revision,
+                .status,
+                .requiresAttributes,
+                .compatibilities,
+                .registeredAt,
+                .registeredBy,
+                .deregisteredAt
+              )
+          ' task-definition.json > new-task-definition.json
+
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$NEW_TASK_ARN"
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
+
+          echo "Successfully deployed $IMAGE_URI"
