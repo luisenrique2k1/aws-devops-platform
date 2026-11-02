@@ -130,4 +130,20 @@ jobs:
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_SERVICE"
 
+          DEPLOYED_TASK_ARN=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          echo "Expected task definition: $NEW_TASK_ARN"
+          echo "Deployed task definition: $DEPLOYED_TASK_ARN"
+
+          if [ "$DEPLOYED_TASK_ARN" != "$NEW_TASK_ARN" ]; then
+            echo "ERROR: ECS deployment failed or rolled back."
+            echo "The service is not running the expected task definition."
+            exit 1
+          fi
+
+          echo "SUCCESS: ECS is running the expected task definition."
           echo "Successfully deployed $IMAGE_URI"
