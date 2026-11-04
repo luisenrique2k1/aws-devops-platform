@@ -67,7 +67,10 @@ jobs:
           ECR_REPOSITORY: aws-devops-fastapi
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
+          docker build \
+            --platform linux/amd64 \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            ./app
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
   deploy-to-ecs:
@@ -93,10 +96,28 @@ jobs:
           TASK_FAMILY: aws-devops-fastapi
           IMAGE_TAG: ${{ github.sha }}
         run: |
+          set -euo pipefail
+
           IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/aws-devops-fastapi:$IMAGE_TAG"
 
+          echo "Waiting for ECS service to become stable..."
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
+
+          echo "ECS service is stable."
+
+          CURRENT_TASK_ARN=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          echo "Using currently deployed task definition: $CURRENT_TASK_ARN"
+
           aws ecs describe-task-definition \
-            --task-definition "$TASK_FAMILY" \
+            --task-definition "$CURRENT_TASK_ARN" \
             --query taskDefinition \
             --output json > task-definition.json
 
@@ -138,6 +159,18 @@ jobs:
 
           echo "Expected task definition: $NEW_TASK_ARN"
           echo "Deployed task definition: $DEPLOYED_TASK_ARN"
+          ROLLOUT_STATE=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].deployments[?status==`PRIMARY`].rolloutState | [0]' \
+            --output text)
+
+          echo "ECS rollout state: $ROLLOUT_STATE"
+
+          if [ "$ROLLOUT_STATE" != "COMPLETED" ]; then
+            echo "ERROR: ECS deployment has not completed successfully."
+            exit 1
+          fi
 
           if [ "$DEPLOYED_TASK_ARN" != "$NEW_TASK_ARN" ]; then
             echo "ERROR: ECS deployment failed or rolled back."
