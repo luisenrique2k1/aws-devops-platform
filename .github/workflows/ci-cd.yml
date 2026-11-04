@@ -96,6 +96,8 @@ jobs:
           TASK_FAMILY: aws-devops-fastapi
           IMAGE_TAG: ${{ github.sha }}
         run: |
+          set -euo pipefail
+
           IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/aws-devops-fastapi:$IMAGE_TAG"
 
           echo "Waiting for ECS service to become stable..."
