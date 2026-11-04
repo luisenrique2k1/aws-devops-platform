@@ -147,36 +147,51 @@ jobs:
             --service "$ECS_SERVICE" \
             --task-definition "$NEW_TASK_ARN"
 
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE"
+            echo "Waiting for ECS deployment to complete..."
 
-          DEPLOYED_TASK_ARN=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --query 'services[0].taskDefinition' \
-            --output text)
+          MAX_ATTEMPTS=40
+          SLEEP_SECONDS=15
 
-          echo "Expected task definition: $NEW_TASK_ARN"
-          echo "Deployed task definition: $DEPLOYED_TASK_ARN"
-          ROLLOUT_STATE=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --query 'services[0].deployments[?status==`PRIMARY`].rolloutState | [0]' \
-            --output text)
+          for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
+            SERVICE_JSON=$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" \
+              --services "$ECS_SERVICE" \
+              --output json)
 
-          echo "ECS rollout state: $ROLLOUT_STATE"
+            DEPLOYED_TASK_ARN=$(echo "$SERVICE_JSON" | jq -r '.services[0].taskDefinition')
+            ROLLOUT_STATE=$(echo "$SERVICE_JSON" | jq -r '.services[0].deployments[] | select(.status == "PRIMARY") | .rolloutState')
+            RUNNING_COUNT=$(echo "$SERVICE_JSON" | jq -r '.services[0].runningCount')
+            DESIRED_COUNT=$(echo "$SERVICE_JSON" | jq -r '.services[0].desiredCount')
+            DEPLOYMENT_COUNT=$(echo "$SERVICE_JSON" | jq -r '.services[0].deployments | length')
 
-          if [ "$ROLLOUT_STATE" != "COMPLETED" ]; then
-            echo "ERROR: ECS deployment has not completed successfully."
-            exit 1
-          fi
+            echo "Attempt $attempt/$MAX_ATTEMPTS"
+            echo "Expected task definition: $NEW_TASK_ARN"
+            echo "Current task definition: $DEPLOYED_TASK_ARN"
+            echo "Rollout state: $ROLLOUT_STATE"
+            echo "Running tasks: $RUNNING_COUNT/$DESIRED_COUNT"
 
-          if [ "$DEPLOYED_TASK_ARN" != "$NEW_TASK_ARN" ]; then
-            echo "ERROR: ECS deployment failed or rolled back."
-            echo "The service is not running the expected task definition."
-            exit 1
-          fi
+            if [ "$DEPLOYED_TASK_ARN" != "$NEW_TASK_ARN" ]; then
+              echo "ERROR: Unexpected task definition. Possible rollback."
+              exit 1
+            fi
 
-          echo "SUCCESS: ECS is running the expected task definition."
-          echo "Successfully deployed $IMAGE_URI"
+            if [ "$ROLLOUT_STATE" = "FAILED" ]; then
+              echo "ERROR: ECS deployment failed."
+              exit 1
+            fi
+
+            if [ "$ROLLOUT_STATE" = "COMPLETED" ] && \
+               [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ] && \
+               [ "$DEPLOYMENT_COUNT" -eq 1 ]; then
+              echo "SUCCESS: ECS deployment completed."
+              echo "Successfully deployed $IMAGE_URI"
+              exit 0
+            fi
+
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              sleep "$SLEEP_SECONDS"
+            fi
+          done
+
+          echo "ERROR: ECS deployment verification timed out."
+          exit 1
